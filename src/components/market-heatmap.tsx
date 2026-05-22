@@ -39,6 +39,7 @@ import {
   heatmapPeriodKeys,
   type HeatmapPeriodKey,
   type MarketKey,
+  type MarketOverviewResponse,
   type TreemapResponse,
 } from "@/lib/market-heatmap";
 
@@ -1008,6 +1009,57 @@ function drawStockLabel(context: CanvasRenderingContext2D, stock: StockRect, zoo
   }
 }
 
+function usePollWhileVisible(task: () => void | Promise<void>, intervalMs: number) {
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const run = () => {
+      if (cancelled) return;
+      Promise.resolve(task()).catch(() => {
+        /* Errors are handled by the task itself. */
+      });
+    };
+
+    const start = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(run, intervalMs);
+    };
+
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        run();
+        start();
+      }
+    };
+
+    if (!document.hidden) {
+      run();
+      start();
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      cancelled = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [task, intervalMs]);
+}
+
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
 
@@ -1780,9 +1832,7 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
 
   const fetchTreemap = useCallback(
     async (nextMarket: MarketKey, nextPeriod: HeatmapPeriodKey) => {
-      const response = await fetch(`/api/heatmap/treemap?market=${nextMarket}&period=${nextPeriod}`, {
-        cache: "no-store",
-      });
+      const response = await fetch(`/api/heatmap/treemap?market=${nextMarket}&period=${nextPeriod}`);
       if (!response.ok) {
         throw new Error(messages.errorLoad);
       }
@@ -1796,9 +1846,7 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
 
   const fetchQuotes = useCallback(
     async (nextMarket: MarketKey, nextPeriod: HeatmapPeriodKey) => {
-      const response = await fetch(`/api/heatmap/quotes?market=${nextMarket}&period=${nextPeriod}`, {
-        cache: "no-store",
-      });
+      const response = await fetch(`/api/heatmap/quotes?market=${nextMarket}&period=${nextPeriod}`);
       if (!response.ok) {
         throw new Error(messages.errorLoad);
       }
@@ -1811,41 +1859,23 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
   );
 
   const fetchMarketSummaries = useCallback(async (nextPeriod: HeatmapPeriodKey) => {
-    const results = await Promise.all(
-      marketOptions.map(async (option) => {
-        const response = await fetch(`/api/heatmap/treemap?market=${option}&period=${nextPeriod}`, {
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error(messages.errorLoad);
-        }
+    const response = await fetch(`/api/heatmap/overview?period=${nextPeriod}`);
+    if (!response.ok) {
+      throw new Error(messages.errorLoad);
+    }
 
-        const payload = (await response.json()) as TreemapResponse;
-        let weightedSum = 0;
-        let totalValue = 0;
+    const payload = (await response.json()) as MarketOverviewResponse;
+    const next: Partial<Record<MarketKey, MarketSummary>> = {};
 
-        for (const board of payload.nodes) {
-          for (const stock of board.children) {
-            weightedSum += stock.changePct * stock.value;
-            totalValue += stock.value;
-          }
-        }
+    for (const item of payload.markets) {
+      next[item.market] = {
+        changePct: item.changePct,
+        stockCount: item.stockCount,
+        updatedAt: item.updatedAt,
+      };
+    }
 
-        const computedChangePct = totalValue > 0 ? weightedSum / totalValue : 0;
-        const indexChangePct = payload.summary.indexChangePct;
-
-        return [
-          option,
-          {
-            changePct: Number.isFinite(indexChangePct) ? indexChangePct : computedChangePct,
-            stockCount: payload.stockCount,
-            updatedAt: payload.updatedAt,
-          },
-        ] as const;
-      })
-    );
-
-    setMarketSummaries(Object.fromEntries(results) as Partial<Record<MarketKey, MarketSummary>>);
+    setMarketSummaries(next);
   }, [messages.errorLoad]);
 
   useEffect(() => {
@@ -1978,49 +2008,27 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
     };
   }, [fetchTreemap, market, messages.errorLoad, period]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadQuotes() {
+  usePollWhileVisible(
+    useCallback(async () => {
       try {
         await fetchQuotes(market, period);
       } catch {
-        if (!cancelled) {
-          setError(messages.errorLoad);
-        }
+        setError(messages.errorLoad);
       }
-    }
+    }, [fetchQuotes, market, messages.errorLoad, period]),
+    refreshIntervalMs
+  );
 
-    loadQuotes();
-    const timer = window.setInterval(loadQuotes, refreshIntervalMs);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [fetchQuotes, market, messages.errorLoad, period]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadSummaries() {
+  usePollWhileVisible(
+    useCallback(async () => {
       try {
         await fetchMarketSummaries(period);
       } catch {
-        if (!cancelled) {
-          // Keep existing summaries if the refresh fails.
-        }
+        // Keep existing summaries if the refresh fails.
       }
-    }
-
-    loadSummaries();
-    const timer = window.setInterval(loadSummaries, refreshIntervalMs);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [fetchMarketSummaries, period]);
+    }, [fetchMarketSummaries, period]),
+    refreshIntervalMs
+  );
 
   useEffect(() => {
     if (!treemapData || boardFilter === allBoardsValue) {

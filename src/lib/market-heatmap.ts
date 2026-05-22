@@ -140,6 +140,20 @@ export type QuotesResponse = {
   source: MarketDataSource;
 };
 
+export type MarketOverviewItem = {
+  market: MarketKey;
+  changePct: number;
+  stockCount: number;
+  updatedAt: string;
+};
+
+export type MarketOverviewResponse = {
+  period: HeatmapPeriodKey;
+  updatedAt: string;
+  markets: MarketOverviewItem[];
+  source: MarketDataSource;
+};
+
 const sinaQuoteBaseUrl = "https://hq.sinajs.cn/list=";
 const eastmoneyQuoteBaseUrl = "https://push2.eastmoney.com/api/qt/ulist.np/get";
 const upDownDistributionUrl = "https://dq.10jqka.com.cn/fuyao/up_down_distribution/distribution/v2/realtime";
@@ -406,7 +420,25 @@ function inMarket(stock: StockSnapshot, market: MarketKey, hs300Set: Set<string>
   return zza500Set.has(stock.code);
 }
 
+// `baselineStocks` is module-level immutable, so derived index sets and per-market
+// filtered slices can be precomputed once instead of on every request.
+const { hs300Set: baselineHs300Set, zza500Set: baselineZza500Set } = buildDynamicIndexSets(baselineStocks);
+const stocksByMarket: Record<MarketKey, StockSnapshot[]> = {
+  all: baselineStocks,
+  sse: baselineStocks.filter((stock) => inMarket(stock, "sse", baselineHs300Set, baselineZza500Set)),
+  szse: baselineStocks.filter((stock) => inMarket(stock, "szse", baselineHs300Set, baselineZza500Set)),
+  hs300: baselineStocks.filter((stock) => inMarket(stock, "hs300", baselineHs300Set, baselineZza500Set)),
+  zza500: baselineStocks.filter((stock) => inMarket(stock, "zza500", baselineHs300Set, baselineZza500Set)),
+  cyb: baselineStocks.filter((stock) => inMarket(stock, "cyb", baselineHs300Set, baselineZza500Set)),
+  kcb: baselineStocks.filter((stock) => inMarket(stock, "kcb", baselineHs300Set, baselineZza500Set)),
+};
+
 function filterStocks(stocks: StockSnapshot[], market: MarketKey) {
+  // Fast path: when filtering the baseline universe, use the precomputed slice.
+  if (stocks === baselineStocks) {
+    return stocksByMarket[market];
+  }
+
   const { hs300Set, zza500Set } = buildDynamicIndexSets(stocks);
   return stocks.filter((stock) => inMarket(stock, market, hs300Set, zza500Set));
 }
@@ -1189,6 +1221,70 @@ export async function getQuoteData(
     metric,
     updatedAt: quoteResult[0].value.updatedAt,
     quotes,
+    source: "direct",
+  };
+}
+
+export async function getOverviewData(
+  period: HeatmapPeriodKey = "day"
+): Promise<MarketOverviewResponse> {
+  const [quoteResult, indexResult] = await Promise.allSettled([
+    getQuoteSnapshot(),
+    getMarketIndexSnapshot(),
+  ]);
+
+  if (quoteResult.status !== "fulfilled") {
+    if (!hasLoggedFallbackWarning) {
+      console.warn("Falling back to bundled market heatmap overview:", {
+        quotes: quoteResult.reason,
+      });
+      hasLoggedFallbackWarning = true;
+    }
+
+    const fallbackMarkets: MarketOverviewItem[] = marketKeys.map((market) => {
+      const stocks = stocksByMarket[market];
+      const changePct = weightedChangePct(stocks, {}, period);
+      return {
+        market,
+        changePct: Number.isFinite(changePct) ? changePct : 0,
+        stockCount: stocks.length,
+        updatedAt: fallbackSnapshotSeed.updatedAt,
+      };
+    });
+
+    return {
+      period,
+      updatedAt: fallbackSnapshotSeed.updatedAt,
+      markets: fallbackMarkets,
+      source: "fallback",
+    };
+  }
+
+  hasLoggedFallbackWarning = false;
+
+  const liveQuotes = quoteResult.value.quotes;
+  const indexSummaries = indexResult.status === "fulfilled" ? indexResult.value.summaries : null;
+
+  const markets: MarketOverviewItem[] = marketKeys.map((market) => {
+    const stocks = stocksByMarket[market];
+    const remoteIndex = indexSummaries?.[market];
+    const remoteIndexChange = getChangeForPeriod(remoteIndex?.changes, period, Number.NaN);
+    const changePct = Number.isFinite(remoteIndexChange)
+      ? remoteIndexChange
+      : weightedChangePct(stocks, liveQuotes, period);
+
+    return {
+      market,
+      changePct: Number.isFinite(changePct) ? changePct : 0,
+      stockCount: stocks.length,
+      updatedAt: quoteResult.value.updatedAt,
+    };
+  });
+
+  return {
+    period,
+    updatedAt: quoteResult.value.updatedAt,
+    markets,
     source: "direct",
   };
 }
