@@ -2780,6 +2780,23 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
     return null;
   }, []);
 
+  const pickSubBoardTitle = useCallback((worldX: number, worldY: number) => {
+    for (let index = lastSubBoardRectsRef.current.length - 1; index >= 0; index -= 1) {
+      const subBoard = lastSubBoardRectsRef.current[index];
+      if (
+        subBoard.titleHeight > 0 &&
+        worldX >= subBoard.x &&
+        worldX <= subBoard.x + subBoard.width &&
+        worldY >= subBoard.y &&
+        worldY <= subBoard.y + subBoard.titleHeight
+      ) {
+        return subBoard;
+      }
+    }
+
+    return null;
+  }, []);
+
   const onMouseMove = useCallback(
     (event: ReactMouseEvent<HTMLCanvasElement>) => {
       if (isMobile) {
@@ -2970,6 +2987,14 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
         return true;
       }
 
+      const subBoardTitle = pickSubBoardTitle(world.x, world.y);
+      if (subBoardTitle) {
+        setBoardFilter((current) =>
+          current === subBoardTitle.boardName ? allBoardsValue : subBoardTitle.boardName
+        );
+        return true;
+      }
+
       // On touch devices the title strip is small; fall back to the whole
       // board so users can double-tap anywhere inside a 一级板块 to toggle.
       const board = pickBoard(world.x, world.y);
@@ -2982,7 +3007,7 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
 
       return false;
     },
-    [pickBoard, pickBoardTitle, toWorldPoint]
+    [pickBoard, pickBoardTitle, pickSubBoardTitle, toWorldPoint]
   );
 
   const openXueqiuForStock = useCallback((code: string) => {
@@ -3205,9 +3230,16 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
 
       const bounds = canvas.getBoundingClientRect();
       const world = toWorldPoint(event.clientX - bounds.left, event.clientY - bounds.top);
+
       const boardTitle = pickBoardTitle(world.x, world.y);
       if (boardTitle) {
         setBoardFilter((current) => (current === boardTitle.name ? allBoardsValue : boardTitle.name));
+        return;
+      }
+
+      const subBoardTitle = pickSubBoardTitle(world.x, world.y);
+      if (subBoardTitle) {
+        setBoardFilter((current) => (current === subBoardTitle.boardName ? allBoardsValue : subBoardTitle.boardName));
         return;
       }
 
@@ -3218,7 +3250,7 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
 
       window.open(`https://xueqiu.com/S/${toXueqiuSymbol(stock.code)}`, "_blank", "noopener,noreferrer");
     },
-    [isMobile, pickBoardTitle, pickStock, toWorldPoint]
+    [isMobile, pickBoardTitle, pickStock, pickSubBoardTitle, toWorldPoint]
   );
 
   const toggleFullscreen = useCallback(() => {
