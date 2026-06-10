@@ -132,6 +132,9 @@ const refreshIntervalMs = 8000;
 const marketOptions: MarketKey[] = ["all", "sse", "szse", "hs300", "zza500", "cyb", "kcb"];
 const periodOptions: HeatmapPeriodKey[] = [...heatmapPeriodKeys];
 const allBoardsValue = "__all__";
+const allTrendsValue = "__all__";
+const risingOnlyValue = "__rising__";
+const fallingOnlyValue = "__falling__";
 const colorLegendSteps = [-4, -3, -2, -1, 0, 1, 2, 3, 4] as const;
 const legendTicks = [-4, -2, 0, 2, 4] as const;
 const minZoom = 1;
@@ -1646,6 +1649,7 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
   const [market, setMarket] = useState<MarketKey>("all");
   const [period, setPeriod] = useState<HeatmapPeriodKey>("day");
   const [boardFilter, setBoardFilter] = useState(allBoardsValue);
+  const [trendFilter, setTrendFilter] = useState(allTrendsValue);
   const [marketSummaries, setMarketSummaries] = useState<Partial<Record<MarketKey, MarketSummary>>>({});
   const [treemapData, setTreemapData] = useState<TreemapResponse | null>(null);
   const [quotes, setQuotes] = useState<QuoteMap>({});
@@ -2049,56 +2053,131 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
     setSelectedBoardName(null);
     setSelectedSubBoardName(null);
     setView({ scale: 1, x: 0, y: 0 });
-  }, [boardFilter]);
+  }, [boardFilter, trendFilter]);
 
   const boardFilterOptions = useMemo(() => treemapData?.nodes ?? [], [treemapData]);
 
   const visibleTreemapData = useMemo<TreemapResponse | null>(() => {
-    if (!treemapData || boardFilter === allBoardsValue) {
+    if (!treemapData) {
       return treemapData;
     }
 
-    const selectedBoard = treemapData.nodes.find((node) => node.name === boardFilter);
-    if (!selectedBoard) {
-      return treemapData;
-    }
-
-    let advanceCount = 0;
-    let flatCount = 0;
-    let declineCount = 0;
-    let turnoverAmount = 0;
-
-    for (const stock of selectedBoard.children) {
-      const changePct = quotes[stock.code]?.changePct ?? stock.changePct;
-
-      if (changePct > flatThreshold) {
-        advanceCount += 1;
-      } else if (changePct < -flatThreshold) {
-        declineCount += 1;
-      } else {
-        flatCount += 1;
+    const applyBoardFilter = (data: TreemapResponse) => {
+      if (boardFilter === allBoardsValue) {
+        return data;
       }
 
-      turnoverAmount += stock.turnoverAmount;
-    }
+      const selectedBoard = data.nodes.find((node) => node.name === boardFilter);
+      if (!selectedBoard) {
+        return data;
+      }
 
-    return {
-      ...treemapData,
-      stockCount: selectedBoard.stockCount,
-      boardCount: 1,
-      summary: {
-        ...treemapData.summary,
-        advanceCount,
-        flatCount,
-        declineCount,
-        turnoverAmount,
-        turnoverPreviousAmount: 0,
-        turnoverDelta: 0,
-        indexChangePct: weightedAverageChange(selectedBoard.children, quotes),
-      },
-      nodes: [selectedBoard],
+      let advanceCount = 0;
+      let flatCount = 0;
+      let declineCount = 0;
+      let turnoverAmount = 0;
+
+      for (const stock of selectedBoard.children) {
+        const changePct = quotes[stock.code]?.changePct ?? stock.changePct;
+
+        if (changePct > flatThreshold) {
+          advanceCount += 1;
+        } else if (changePct < -flatThreshold) {
+          declineCount += 1;
+        } else {
+          flatCount += 1;
+        }
+
+        turnoverAmount += stock.turnoverAmount;
+      }
+
+      return {
+        ...data,
+        stockCount: selectedBoard.stockCount,
+        boardCount: 1,
+        summary: {
+          ...data.summary,
+          advanceCount,
+          flatCount,
+          declineCount,
+          turnoverAmount,
+          turnoverPreviousAmount: 0,
+          turnoverDelta: 0,
+          indexChangePct: weightedAverageChange(selectedBoard.children, quotes),
+        },
+        nodes: [selectedBoard],
+      };
     };
-  }, [boardFilter, quotes, treemapData]);
+
+    const applyTrendFilter = (data: TreemapResponse) => {
+      if (trendFilter === allTrendsValue) {
+        return data;
+      }
+
+      const filteredNodes = data.nodes.map((node) => {
+        const filteredChildren = node.children.filter((stock) => {
+          const changePct = quotes[stock.code]?.changePct ?? stock.changePct;
+          if (trendFilter === risingOnlyValue) {
+            return changePct > flatThreshold;
+          }
+          if (trendFilter === fallingOnlyValue) {
+            return changePct < -flatThreshold;
+          }
+          return true;
+        });
+
+        return {
+          ...node,
+          children: filteredChildren,
+          stockCount: filteredChildren.length,
+          value: filteredChildren.reduce((sum, stock) => sum + stock.value, 0),
+        };
+      }).filter((node) => node.children.length > 0);
+
+      let advanceCount = 0;
+      let flatCount = 0;
+      let declineCount = 0;
+      let turnoverAmount = 0;
+      let totalStockCount = 0;
+
+      for (const node of filteredNodes) {
+        for (const stock of node.children) {
+          const changePct = quotes[stock.code]?.changePct ?? stock.changePct;
+
+          if (changePct > flatThreshold) {
+            advanceCount += 1;
+          } else if (changePct < -flatThreshold) {
+            declineCount += 1;
+          } else {
+            flatCount += 1;
+          }
+
+          turnoverAmount += stock.turnoverAmount;
+          totalStockCount += 1;
+        }
+      }
+
+      return {
+        ...data,
+        stockCount: totalStockCount,
+        boardCount: filteredNodes.length,
+        summary: {
+          ...data.summary,
+          advanceCount,
+          flatCount,
+          declineCount,
+          turnoverAmount,
+          turnoverPreviousAmount: 0,
+          turnoverDelta: 0,
+        },
+        nodes: filteredNodes,
+      };
+    };
+
+    let result = applyBoardFilter(treemapData);
+    result = applyTrendFilter(result);
+    return result;
+  }, [boardFilter, trendFilter, quotes, treemapData]);
 
   const marketOverview = useMemo<MarketOverview | null>(() => {
     if (!visibleTreemapData) {
@@ -3672,6 +3751,62 @@ export function MarketHeatmap({ locale: initialLocale }: { locale: Locale; messa
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div className={cn("mt-1.5 border border-border bg-muted/18 p-1.5", isEnglish && "mt-1 p-[5px]")}>
+                <label
+                  htmlFor="trend-filter"
+                  className={cn(
+                    "block font-semibold uppercase tracking-[0.12em] text-muted-foreground",
+                    isEnglish ? "text-[9px]" : "text-[10px]"
+                  )}
+                >
+                  {messages.trendFilterLabel}
+                </label>
+                <div className={cn("mt-1 grid grid-cols-3 gap-1", isEnglish && "gap-0.5")}>
+                  <button
+                    type="button"
+                    onClick={() => setTrendFilter(allTrendsValue)}
+                    aria-pressed={trendFilter === allTrendsValue}
+                    className={cn(
+                      "h-7 border px-1 text-center font-semibold leading-tight transition-colors",
+                      isEnglish ? "text-[9.5px]" : "text-[10.5px]",
+                      trendFilter === allTrendsValue
+                        ? "border-brand/70 bg-brand/18 text-foreground"
+                        : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    {messages.allTrends}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTrendFilter(risingOnlyValue)}
+                    aria-pressed={trendFilter === risingOnlyValue}
+                    className={cn(
+                      "h-7 border px-1 text-center font-semibold leading-tight transition-colors",
+                      isEnglish ? "text-[9.5px]" : "text-[10.5px]",
+                      trendFilter === risingOnlyValue
+                        ? "border-brand/70 bg-brand/18 text-foreground"
+                        : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    {messages.risingOnly}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTrendFilter(fallingOnlyValue)}
+                    aria-pressed={trendFilter === fallingOnlyValue}
+                    className={cn(
+                      "h-7 border px-1 text-center font-semibold leading-tight transition-colors",
+                      isEnglish ? "text-[9.5px]" : "text-[10.5px]",
+                      trendFilter === fallingOnlyValue
+                        ? "border-brand/70 bg-brand/18 text-foreground"
+                        : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    {messages.fallingOnly}
+                  </button>
+                </div>
               </div>
 
               <div className={cn("mt-1.5 border border-border bg-muted/18 p-1.5", isEnglish && "mt-1 p-[5px]")}>
